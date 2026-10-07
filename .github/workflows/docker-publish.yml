@@ -1,0 +1,143 @@
+name: Build and publish
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly rebuild (Monday 03:00 UTC): picks up updates of every base image.
+    - cron: '0 3 * * 1'
+    # Daily check: rebuilds only when mcr.microsoft.com/dotnet/sdk:10.0 has a new digest.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: nardo86/dotnet-ci
+  DOTNET_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0
+  NODE_IMAGE: node:24-slim
+  DOCKER_CLI_IMAGE: docker:29-cli
+  MIN_SDK: 10.0.401
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Pin every base by digest, so the image records exactly what it was built from.
+      - name: Resolve base images
+        id: base
+        run: |
+          digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -re .digest; }
+          sdk_digest=$(digest "$DOTNET_SDK_IMAGE")
+          echo "sdk_ref=$DOTNET_SDK_IMAGE@$sdk_digest" >> "$GITHUB_OUTPUT"
+          echo "sdk_digest=$sdk_digest" >> "$GITHUB_OUTPUT"
+          echo "node_ref=$NODE_IMAGE@$(digest "$NODE_IMAGE")" >> "$GITHUB_OUTPUT"
+          echo "cli_ref=$DOCKER_CLI_IMAGE@$(digest "$DOCKER_CLI_IMAGE")" >> "$GITHUB_OUTPUT"
+          echo "dotnet/sdk: $sdk_digest"
+
+      # On the daily schedule, stop here unless the published image is built from an older SDK base.
+      - name: Check for a new base image
+        id: gate
+        run: |
+          build=true
+          if [ "${{ github.event.schedule }}" = "0 5 * * *" ]; then
+            published=$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Image}}' 2>/dev/null \
+              | jq -r 'if has("config") then .config.Labels else ([.[]][0].config.Labels) end
+                       | .["org.opencontainers.image.base.digest"] // ""' || true)
+            if [ "$published" = "${{ steps.base.outputs.sdk_digest }}" ]; then build=false; fi
+            echo "published base: ${published:-none}"
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build=$build"
+
+      - name: Compute version and tags
+        if: steps.gate.outputs.build == 'true'
+        id: ver
+        run: |
+          sdk=$(docker run --rm --pull always "${{ steps.base.outputs.sdk_ref }}" dotnet --version)
+          if ! dpkg --compare-versions "$sdk" ge "$MIN_SDK"; then
+            echo "dotnet SDK $sdk < $MIN_SDK" >&2; exit 1
+          fi
+          # Immutable tag: <sdk>-<yyyymmdd>, with .2, .3... if that day already has one. Never overwritten.
+          base="$sdk-$(date -u +%Y%m%d)"
+          tag="$base"; n=1
+          while docker buildx imagetools inspect "$IMAGE_NAME:$tag" >/dev/null 2>&1; do
+            n=$((n + 1)); tag="$base.$n"
+          done
+          echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "SDK $sdk, immutable tag $tag"
+
+      - name: Log in to Docker Hub
+        if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Build and push
+        if: steps.gate.outputs.build == 'true'
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            DOTNET_SDK_IMAGE=${{ steps.base.outputs.sdk_ref }}
+            NODE_IMAGE=${{ steps.base.outputs.node_ref }}
+            DOCKER_CLI_IMAGE=${{ steps.base.outputs.cli_ref }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:10.0
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.description=CI job image: .NET SDK 10, Node.js 24, Docker CLI 29 (compose, buildx)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.ver.outputs.created }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.sdk }}
+            org.opencontainers.image.base.name=${{ env.DOTNET_SDK_IMAGE }}
+            org.opencontainers.image.base.digest=${{ steps.base.outputs.sdk_digest }}
+
+      - name: Summary
+        if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Published"
+            echo "- \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}\` (also \`10.0\`, \`latest\`)"
+            echo "- digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- pin: \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}@${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Update Docker Hub description
+        if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request'
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+          repository: ${{ env.IMAGE_NAME }}
+          readme-filepath: ./README.md
+
+  # Scheduled runs don't count as repository activity: without this GitHub disables the
+  # schedule after 60 days without commits. Re-enabling the workflow resets that timer.
+  workflow-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/docker-publish.yml/enable"
