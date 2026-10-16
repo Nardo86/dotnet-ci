@@ -88,6 +88,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: generic
           platforms: linux/amd64
           pull: true
           push: ${{ github.event_name != 'pull_request' }}
@@ -109,6 +110,35 @@ jobs:
             org.opencontainers.image.base.name=${{ env.DOTNET_SDK_IMAGE }}
             org.opencontainers.image.base.digest=${{ steps.base.outputs.sdk_digest }}
 
+      # Same build plus Chromium for Playwright (target playwright): the generic layers come from the builder's cache.
+      - name: Build and push (Playwright)
+        if: steps.gate.outputs.build == 'true'
+        id: push-playwright
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: playwright
+          platforms: linux/amd64
+          pull: true
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            DOTNET_SDK_IMAGE=${{ steps.base.outputs.sdk_ref }}
+            NODE_IMAGE=${{ steps.base.outputs.node_ref }}
+            DOCKER_CLI_IMAGE=${{ steps.base.outputs.cli_ref }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.tag }}-playwright
+            ${{ env.IMAGE_NAME }}:10.0-playwright
+            ${{ env.IMAGE_NAME }}:playwright
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.description=CI job image: .NET SDK 10, Node.js 24, Docker CLI 29 (compose, buildx), Chromium for Playwright
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.ver.outputs.created }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.sdk }}
+            org.opencontainers.image.base.name=${{ env.DOTNET_SDK_IMAGE }}
+            org.opencontainers.image.base.digest=${{ steps.base.outputs.sdk_digest }}
+
       - name: Summary
         if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request'
         run: |
@@ -117,6 +147,8 @@ jobs:
             echo "- \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}\` (also \`10.0\`, \`latest\`)"
             echo "- digest: \`${{ steps.push.outputs.digest }}\`"
             echo "- pin: \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}@${{ steps.push.outputs.digest }}\`"
+            echo "- \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}-playwright\` (also \`10.0-playwright\`, \`playwright\`)"
+            echo "- pin: \`$IMAGE_NAME:${{ steps.ver.outputs.tag }}-playwright@${{ steps.push-playwright.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
 
