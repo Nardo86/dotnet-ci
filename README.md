@@ -25,6 +25,7 @@ Docker commands (Testcontainers, `docker compose`, `docker buildx`) use whatever
 | `<sdk>-<yyyymmdd>`, e.g. `10.0.401-20261007` | immutable, one per build, never overwritten (a second build on the same day gets `.2`, `.3`, …) |
 | `10.0` | moving: latest build on the .NET 10 SDK |
 | `latest` | moving: same as `10.0` |
+| `<sdk>-<yyyymmdd>-playwright`, `10.0-playwright`, `playwright` | the same build plus Chromium and Chromium headless shell of **Playwright 1.63.0** with their system libraries, in `/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`); the Playwright package of the project must have the same version |
 
 For reproducible CI, pin the immutable tag together with its digest (`nardo86/dotnet-ci:10.0.401-20261007@sha256:…`); the digest of every build is printed in the summary of the workflow run.
 
@@ -69,12 +70,13 @@ RUN dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
  && rm -rf /var/lib/apt/lists/*
 ```
 
-**3. Browsers / Playwright**: keep them in a separate derived image; they add more than 1 GB and most jobs don't need them.
+**3. Browsers / Playwright**: use the `-playwright` variant below; it adds more than 1 GB and most jobs don't need it.
 
 ## Build locally
 
 ```bash
-docker build --pull -t dotnet-ci:local .
+docker build --pull --target generic -t dotnet-ci:local .
+docker build --pull --target playwright -t dotnet-ci:local-playwright .
 ```
 
 The build fails if any of the version checks at the end of the `Dockerfile` fails (SDK ≥ 10.0.401, Node 24.x, Docker CLI and plugins, Python, Git, jq).

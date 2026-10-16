@@ -1,15 +1,18 @@
 # Generic CI job image for .NET (GitHub Actions, Forgejo/Gitea runners, act).
 # Contents: .NET SDK 10 (base), Node.js 24, Docker CLI 29 + compose + buildx, a few tools.
+# Two targets: «generic» (tags 10.0, latest) and «playwright» (same plus Chromium for Playwright, tag suffix -playwright).
 # The workflow pins every base by digest through the build args below.
 
 ARG DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0
 ARG NODE_IMAGE=node:24-slim
 ARG DOCKER_CLI_IMAGE=docker:29-cli
+# Chromium of this Playwright release (target playwright): it must match the Playwright package of the projects.
+ARG PLAYWRIGHT_VERSION=1.63.0
 
 FROM ${NODE_IMAGE} AS node
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 
-FROM ${DOTNET_SDK_IMAGE}
+FROM ${DOTNET_SDK_IMAGE} AS generic
 
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1
@@ -53,3 +56,17 @@ RUN set -eu; \
     unzip -v | head -n 1
 
 CMD ["bash"]
+
+# Variant for browser tests: Chromium and its headless shell, with the system libraries they need, in
+# PLAYWRIGHT_BROWSERS_PATH. Playwright for .NET, Node or Python finds them there and never downloads a browser in a job.
+# More than 1 GB: kept out of the generic image.
+FROM generic AS playwright
+ARG PLAYWRIGHT_VERSION
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+ && chmod -R a+rX /ms-playwright \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/* /root/.npm \
+ && chrome="$(ls -d /ms-playwright/chromium-*/chrome-linux*/chrome | head -n 1)" \
+ && test -x "$chrome" \
+ && "$chrome" --version
