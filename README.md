@@ -70,7 +70,7 @@ RUN dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
  && rm -rf /var/lib/apt/lists/*
 ```
 
-**3. Browsers / Playwright**: use the `-playwright` variant below; it adds more than 1 GB and most jobs don't need it.
+**3. Browsers / Playwright**: use the `-playwright` variant (see the tags table above); it adds more than 1 GB and most jobs don't need it.
 
 ## Build locally
 
